@@ -616,6 +616,8 @@ def visualize_mrms(date_for_visualization, data_path):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     from rasterio.plot import show
+    import matplotlib.colors as colors
+    import matplotlib.ticker as mticker
 
     # Format the MRMS filename based on the visualization date
     formatted_date = date_for_visualization.strftime('%Y%m%d-%H%M%S')
@@ -631,22 +633,46 @@ def visualize_mrms(date_for_visualization, data_path):
             mrms_data = src.read(1)  # Read the first band
             transform = src.transform  # Get the transform from the source
             
+            # Get the center coordinates of the raster
+            bounds = src.bounds
+            center_lon = (bounds.left + bounds.right) / 2
+            center_lat = (bounds.bottom + bounds.top) / 2
+            
             # Create a figure for visualization with geographic features
             fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={'projection': ccrs.PlateCarree()})
+            
+            # Set extent to 10° x 10° around the center of the raster
+            ax.set_extent([center_lon - 5, center_lon + 5, center_lat - 5, center_lat + 5], crs=ccrs.PlateCarree())
             
             # Add geographic features
             ax.add_feature(cfeature.COASTLINE)
             ax.add_feature(cfeature.BORDERS, linestyle=':')
             ax.add_feature(cfeature.STATES, linestyle=':')
             
-            # Show the raster data - use the transform from the source file
-            show(mrms_data, ax=ax, cmap='Blues', transform=transform)
+            # Create a custom colormap with light gray for zero values
+            cmap = plt.cm.Blues.copy()
+            cmap.set_under('lightgray')  # Set color for values below vmin
             
-            plt.colorbar(ax.images[0], label='Precipitation (mm)', shrink=0.5)
+            # Show the raster data with custom colormap
+            # Use vmin slightly above zero to ensure zero values are colored light gray
+            show(mrms_data, ax=ax, cmap=cmap, transform=transform, vmin=0.01)
+            
+            # Add gridlines with latitude and longitude labels
+            gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
+            gl.top_labels = False
+            gl.right_labels = False
+            gl.xlocator = mticker.MultipleLocator(2)
+            gl.ylocator = mticker.MultipleLocator(2)
+            gl.xformatter = mticker.FuncFormatter(lambda x, pos: f"{int(x)}" if x == int(x) else "")
+            gl.yformatter = mticker.FuncFormatter(lambda y, pos: f"{int(y)}" if y == int(y) else "")
+            
+            plt.colorbar(ax.images[0], label='Precipitation (mm)', shrink=0.5, extend='min')
             plt.title(f'MRMS Precipitation - {formatted_date}')
             plt.show()
+            # return True
     else:
         print(f"MRMS file not found: {mrms_tif_path}")
+        # return False
 
 
 def visualize_pet(date_for_visualization, data_path):
@@ -935,6 +961,78 @@ def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot
     else:
         plt.close()
     
+def evaluate_model_performance(ts_file='../Output/ts.07325850.crest.csv'):
+    """
+    Evaluate hydrological model performance by calculating statistical metrics
+    between simulated and observed discharge.
+    
+    Parameters:
+    -----------
+    ts_file : str, optional
+        Path to the time series CSV file with model results
+        
+    Returns:
+    --------
+    dict: Dictionary containing the calculated performance metrics
+    """
+    # Check if file exists
+    if not os.path.exists(ts_file):
+        print(f"Error: Results file not found at {ts_file}")
+        return None
+        
+    # Read the CSV file
+    try:
+        df = pd.read_csv(ts_file)
+    except Exception as e:
+        print(f"Error reading results file: {str(e)}")
+        return None
+    
+    print(f"Evaluating model performance from: {os.path.abspath(ts_file)}")
+    
+    # Extract simulated and observed discharge
+    sim = df['Discharge(m^3 s^-1)'].values
+    obs = df['Observed(m^3 s^-1)'].values
+    
+    # Remove any rows where either simulated or observed values are NaN
+    valid_indices = ~(np.isnan(sim) | np.isnan(obs))
+    sim = sim[valid_indices]
+    obs = obs[valid_indices]
+    
+    if len(sim) == 0 or len(obs) == 0:
+        print("Error: No valid data points after removing NaN values")
+        return None
+    
+    # Calculate Root Mean Square Error (RMSE)
+    rmse = np.sqrt(np.mean((sim - obs) ** 2))
+    
+    # Calculate Bias (as percentage)
+    bias = np.mean(sim - obs)
+    bias_percent = (bias / np.mean(obs)) * 100
+    
+    # Calculate Correlation Coefficient (CC)
+    cc = np.corrcoef(sim, obs)[0, 1]
+    
+    # Calculate Nash-Sutcliffe Coefficient of Efficiency (NSCE)
+    mean_obs = np.mean(obs)
+    nsce = 1 - (np.sum((sim - obs) ** 2) / np.sum((obs - mean_obs) ** 2))
+    
+    # Create a dictionary with the metrics
+    metrics = {
+        'RMSE': rmse,
+        'Bias': bias,
+        'Bias_percent': bias_percent,
+        'CC': cc,
+        'NSCE': nsce
+    }
+    
+    # Print the metrics
+    print("\nModel Performance Metrics:")
+    print(f"RMSE: {rmse:.4f} m³/s")
+    print(f"Bias: {bias:.4f} m³/s ({bias_percent:.2f}%)")
+    print(f"CC: {cc:.4f}")
+    print(f"NSCE: {nsce:.4f}")
+    
+    return metrics
 
 def create_output_directory(output_dir='../Output'):
     """
