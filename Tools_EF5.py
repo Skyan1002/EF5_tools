@@ -171,31 +171,289 @@ def download_pet_data(start_date, end_date, download_folder='../PET_data'):
     if failed_downloads > 0:
         print(f"Note: {failed_downloads} files failed to download")
 
-def process_mrms_grib2_to_tif(input_folder='../MRMS_precipitation', output_folder='../CREST_input/MRMS/', basin_shp_path='shpFile/Basin_selected_5.shp'):
+# def process_mrms_grib2_to_tif(input_folder='../MRMS_precipitation', output_folder='../CREST_input/MRMS/', basin_shp_path='shpFile/Basin_selected_5.shp'):
+#     """
+#     Process MRMS grib2 files to GeoTIFF format and clip to basin boundary.
+    
+#     Args:
+#         input_folder (str): Path to the folder containing MRMS grib2 files
+#         output_folder (str): Path to save the output GeoTIFF files
+#         basin_shp_path (str): Path to the basin shapefile for clipping
+#     """
+#     # Create output directory if it doesn't exist
+#     if not os.path.exists(output_folder):
+#         os.makedirs(output_folder)
+#     else:
+#         # Clear all files in the output folder
+#         for file_path in glob.glob(os.path.join(output_folder, '*')):
+#             if os.path.isfile(file_path):
+#                 os.remove(file_path)
+#         print(f"Cleared all existing files in {output_folder}")
+    
+#     # Load the basin shapefile
+#     try:
+#         basin_gdf = gpd.read_file(basin_shp_path)
+#         basin_bounds = basin_gdf.total_bounds  # (minx, miny, maxx, maxy)
+        
+#         # Expand the bounds by 5% to make the clipping area slightly larger than the basin
+#         width = basin_bounds[2] - basin_bounds[0]
+#         height = basin_bounds[3] - basin_bounds[1]
+#         buffer_x = width * 1
+#         buffer_y = height * 1
+        
+#         expanded_bounds = (
+#             basin_bounds[0] - buffer_x,  # minx
+#             basin_bounds[1] - buffer_y,  # miny
+#             basin_bounds[2] + buffer_x,  # maxx
+#             basin_bounds[3] + buffer_y   # maxy
+#         )
+        
+#         print(f"Loaded basin shapefile: {basin_shp_path}")
+#         print(f"Original bounds: ({basin_bounds[0]:.3f}, {basin_bounds[1]:.3f}, {basin_bounds[2]:.3f}, {basin_bounds[3]:.3f})")
+#         print(f"Expanded bounds: ({expanded_bounds[0]:.3f}, {expanded_bounds[1]:.3f}, {expanded_bounds[2]:.3f}, {expanded_bounds[3]:.3f})")
+#     except Exception as e:
+#         print(f"Error loading basin shapefile: {str(e)}")
+#         print("Processing will continue without clipping to basin boundary")
+#         basin_gdf = None
+#         expanded_bounds = None
+    
+#     # Find all grib2 files in the input folder
+#     grib2_files = glob.glob(os.path.join(input_folder, '*.grib2'))
+    
+#     if not grib2_files:
+#         print(f"No grib2 files found in {input_folder}")
+#         return
+    
+#     print(f"Processing {len(grib2_files)} MRMS grib2 files to GeoTIFF format")
+#     print(f"Input folder: {os.path.abspath(input_folder)}")
+#     print(f"Output folder: {os.path.abspath(output_folder)}")
+    
+#     failed_files = 0
+    
+#     # Process each grib2 file
+#     with tqdm(total=len(grib2_files), desc="Converting MRMS to GeoTIFF") as pbar:
+#         for grib_file in grib2_files:
+#             # Get the base filename without extension
+#             base_name = os.path.basename(grib_file)
+#             output_name = os.path.splitext(base_name)[0] + '.tif'
+#             output_path = os.path.join(output_folder, output_name)
+            
+#             try:
+#                 # Open the grib2 file with GDAL
+#                 src_ds = gdal.Open(grib_file)
+#                 if src_ds is None:
+#                     failed_files += 1
+#                     tqdm.write(f"Could not open {grib_file}")
+#                     pbar.update(1)
+#                     continue
+                
+#                 if basin_gdf is not None:
+#                     # Process with basin clipping
+#                     with rasterio.open(grib_file) as src:
+#                         data = src.read(1)
+#                         # Set values >1000 or <0 to -9999
+#                         data = np.where((data > 1000) | (data < 0), -9999, data)
+#                         # Explicitly convert to float32
+#                         data_float32 = data.astype(np.float32)
+                        
+#                         # Get the window for the expanded basin bounds
+#                         window = from_bounds(expanded_bounds[0], expanded_bounds[1], 
+#                                             expanded_bounds[2], expanded_bounds[3], 
+#                                             src.transform)
+                        
+#                         # Read only the data within the expanded basin bounds
+#                         clipped_data = src.read(1, window=window)
+#                         clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), -9999, clipped_data)
+#                         # Explicitly convert to float32
+#                         clipped_data = clipped_data.astype(np.float32)
+                        
+#                         # Get the transform for the clipped data
+#                         clipped_transform = rasterio.windows.transform(window, src.transform)
+                        
+#                         # Update metadata for the clipped output
+#                         new_meta = {
+#                             'driver': 'GTiff',
+#                             'height': clipped_data.shape[0],
+#                             'width': clipped_data.shape[1],
+#                             'count': 1,
+#                             'dtype': 'float32',
+#                             'crs': src.crs,
+#                             'transform': clipped_transform,
+#                             'nodata': -9999,
+#                             'compress': 'none'
+#                         }
+#                         with rasterio.open(output_path, 'w', **new_meta) as dst:
+#                             dst.write(clipped_data, 1)
+#                 else:
+#                     # Create output GeoTIFF without clipping
+#                     driver = gdal.GetDriverByName('GTiff')
+#                     dst_ds = driver.CreateCopy(output_path, src_ds, 0)
+                    
+#                     # Get the band
+#                     band = dst_ds.GetRasterBand(1)
+#                     data = band.ReadAsArray()
+#                     # Explicitly convert to float32
+#                     data = data.astype(np.float32)
+                    
+#                     # Set values >1000 or <0 to -9999
+#                     data = np.where((data > 1000) | (data < 0), -9999, data)
+                    
+#                     # Set nodata value
+#                     band.SetNoDataValue(-9999)
+                    
+#                     # Write the data as float32
+#                     band.WriteArray(data)
+                    
+#                     # Close datasets
+#                     dst_ds = None
+                
+#                 src_ds = None
+                
+#             except Exception as e:
+#                 failed_files += 1
+#                 tqdm.write(f"Error processing {base_name}: {str(e)[:100]}...")
+            
+#             pbar.update(1)
+    
+#     # Process files in output folder to ensure correct format
+#     tif_files = glob.glob(os.path.join(output_folder, '*.tif'))
+#     print(f"Ensuring proper format for {len(tif_files)} output files")
+    
+#     with tqdm(total=len(tif_files), desc="Checking output formats") as pbar:
+#         for file_path in tif_files:
+#             try:
+#                 with rasterio.open(file_path) as src:
+#                     data = src.read(1)
+#                     # Set values >1000 or <0 to -9999
+#                     data = np.where((data > 1000) | (data < 0), -9999, data)
+#                     data_float32 = data.astype('float32')
+#                     meta = src.meta.copy()
+#                     meta.update({'dtype': 'float32', 'nodata': -9999, 'compress': 'none'})
+                    
+#                 with rasterio.open(file_path, 'w', **meta) as dst:
+#                     dst.write(data_float32, 1)
+#             except Exception as e:
+#                 tqdm.write(f"Error formatting {os.path.basename(file_path)}: {str(e)[:100]}...")
+            
+#             pbar.update(1)
+    
+#     print(f"MRMS conversion completed. Output files saved to {os.path.abspath(output_folder)}")
+#     if failed_files > 0:
+#         print(f"Note: {failed_files} files failed to process")
+
+import os
+import glob
+import numpy as np
+import geopandas as gpd
+from osgeo import gdal
+import rasterio
+from rasterio.windows import from_bounds
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+def _process_single_file(grib_file, output_folder, basin_clipping, expanded_bounds):
     """
-    Process MRMS grib2 files to GeoTIFF format and clip to basin boundary.
+    Helper function to process a single GRIB2 file.
+    It converts the file to GeoTIFF format and clips it if basin clipping is enabled.
     
     Args:
-        input_folder (str): Path to the folder containing MRMS grib2 files
-        output_folder (str): Path to save the output GeoTIFF files
-        basin_shp_path (str): Path to the basin shapefile for clipping
+        grib_file (str): Path to the GRIB2 file.
+        output_folder (str): Folder to save the output GeoTIFF file.
+        basin_clipping (bool): Whether to perform clipping to basin bounds.
+        expanded_bounds (tuple or None): Expanded bounds for clipping (minx, miny, maxx, maxy).
+        
+    Returns:
+        tuple: (base filename, error message or None if successful)
     """
-    # Create output directory if it doesn't exist
+    base_name = os.path.basename(grib_file)
+    output_name = os.path.splitext(base_name)[0] + '.tif'
+    output_path = os.path.join(output_folder, output_name)
+    try:
+        # Open the grib2 file using GDAL
+        src_ds = gdal.Open(grib_file)
+        if src_ds is None:
+            return (base_name, "Could not open file")
+        
+        if basin_clipping:
+            # Process with basin clipping using rasterio
+            with rasterio.open(grib_file) as src:
+                # Read the data and apply nodata filter
+                data = src.read(1)
+                data = np.where((data > 1000) | (data < 0), -9999, data)
+                data_float32 = data.astype(np.float32)
+                
+                # Determine window corresponding to the expanded basin bounds
+                window = from_bounds(expanded_bounds[0], expanded_bounds[1],
+                                     expanded_bounds[2], expanded_bounds[3],
+                                     src.transform)
+                # Read only the data within the window
+                clipped_data = src.read(1, window=window)
+                clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), -9999, clipped_data)
+                clipped_data = clipped_data.astype(np.float32)
+                
+                # Get the transform for the clipped window
+                clipped_transform = rasterio.windows.transform(window, src.transform)
+                
+                # Prepare metadata for output GeoTIFF
+                new_meta = {
+                    'driver': 'GTiff',
+                    'height': clipped_data.shape[0],
+                    'width': clipped_data.shape[1],
+                    'count': 1,
+                    'dtype': 'float32',
+                    'crs': src.crs,
+                    'transform': clipped_transform,
+                    'nodata': -9999,
+                    'compress': 'none'
+                }
+                with rasterio.open(output_path, 'w', **new_meta) as dst:
+                    dst.write(clipped_data, 1)
+        else:
+            # Process without basin clipping
+            driver = gdal.GetDriverByName('GTiff')
+            dst_ds = driver.CreateCopy(output_path, src_ds, 0)
+            band = dst_ds.GetRasterBand(1)
+            data = band.ReadAsArray()
+            data = data.astype(np.float32)
+            data = np.where((data > 1000) | (data < 0), -9999, data)
+            band.SetNoDataValue(-9999)
+            band.WriteArray(data)
+            dst_ds = None
+        
+        src_ds = None
+        return (base_name, None)
+    except Exception as e:
+        return (base_name, str(e)[:100])
+
+def process_mrms_grib2_to_tif(input_folder='../MRMS_precipitation', 
+                              output_folder='../CREST_input/MRMS/', 
+                              basin_shp_path='shpFile/Basin_selected_5.shp',
+                              num_processes=1):
+    """
+    Process MRMS grib2 files to GeoTIFF format and clip to basin boundary.
+    The function now supports parallel processing using multiple processes.
+    
+    Args:
+        input_folder (str): Path to the folder containing MRMS grib2 files.
+        output_folder (str): Path to save the output GeoTIFF files.
+        basin_shp_path (str): Path to the basin shapefile for clipping.
+        num_processes (int): Number of processes to use (use 1 for sequential processing).
+    """
+    # Create or clear the output directory
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     else:
-        # Clear all files in the output folder
         for file_path in glob.glob(os.path.join(output_folder, '*')):
             if os.path.isfile(file_path):
                 os.remove(file_path)
         print(f"Cleared all existing files in {output_folder}")
     
-    # Load the basin shapefile
+    # Load the basin shapefile and compute expanded bounds for clipping
     try:
         basin_gdf = gpd.read_file(basin_shp_path)
         basin_bounds = basin_gdf.total_bounds  # (minx, miny, maxx, maxy)
         
-        # Expand the bounds by 5% to make the clipping area slightly larger than the basin
+        # Expand the bounds by 100% of the width/height (adjust factor as needed)
         width = basin_bounds[2] - basin_bounds[0]
         height = basin_bounds[3] - basin_bounds[1]
         buffer_x = width * 1
@@ -209,17 +467,20 @@ def process_mrms_grib2_to_tif(input_folder='../MRMS_precipitation', output_folde
         )
         
         print(f"Loaded basin shapefile: {basin_shp_path}")
-        print(f"Original bounds: ({basin_bounds[0]:.3f}, {basin_bounds[1]:.3f}, {basin_bounds[2]:.3f}, {basin_bounds[3]:.3f})")
-        print(f"Expanded bounds: ({expanded_bounds[0]:.3f}, {expanded_bounds[1]:.3f}, {expanded_bounds[2]:.3f}, {expanded_bounds[3]:.3f})")
+        print(f"Original bounds: ({basin_bounds[0]:.3f}, {basin_bounds[1]:.3f}, "
+              f"{basin_bounds[2]:.3f}, {basin_bounds[3]:.3f})")
+        print(f"Expanded bounds: ({expanded_bounds[0]:.3f}, {expanded_bounds[1]:.3f}, "
+              f"{expanded_bounds[2]:.3f}, {expanded_bounds[3]:.3f})")
+        basin_clipping = True
     except Exception as e:
         print(f"Error loading basin shapefile: {str(e)}")
         print("Processing will continue without clipping to basin boundary")
         basin_gdf = None
         expanded_bounds = None
+        basin_clipping = False
     
-    # Find all grib2 files in the input folder
+    # Retrieve list of GRIB2 files from the input folder
     grib2_files = glob.glob(os.path.join(input_folder, '*.grib2'))
-    
     if not grib2_files:
         print(f"No grib2 files found in {input_folder}")
         return
@@ -229,113 +490,42 @@ def process_mrms_grib2_to_tif(input_folder='../MRMS_precipitation', output_folde
     print(f"Output folder: {os.path.abspath(output_folder)}")
     
     failed_files = 0
-    
-    # Process each grib2 file
-    with tqdm(total=len(grib2_files), desc="Converting MRMS to GeoTIFF") as pbar:
-        for grib_file in grib2_files:
-            # Get the base filename without extension
-            base_name = os.path.basename(grib_file)
-            output_name = os.path.splitext(base_name)[0] + '.tif'
-            output_path = os.path.join(output_folder, output_name)
-            
-            try:
-                # Open the grib2 file with GDAL
-                src_ds = gdal.Open(grib_file)
-                if src_ds is None:
-                    failed_files += 1
-                    tqdm.write(f"Could not open {grib_file}")
-                    pbar.update(1)
-                    continue
-                
-                if basin_gdf is not None:
-                    # Process with basin clipping
-                    with rasterio.open(grib_file) as src:
-                        data = src.read(1)
-                        # Set values >1000 or <0 to -9999
-                        data = np.where((data > 1000) | (data < 0), -9999, data)
-                        # Explicitly convert to float32
-                        data_float32 = data.astype(np.float32)
-                        
-                        # Get the window for the expanded basin bounds
-                        window = from_bounds(expanded_bounds[0], expanded_bounds[1], 
-                                            expanded_bounds[2], expanded_bounds[3], 
-                                            src.transform)
-                        
-                        # Read only the data within the expanded basin bounds
-                        clipped_data = src.read(1, window=window)
-                        clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), -9999, clipped_data)
-                        # Explicitly convert to float32
-                        clipped_data = clipped_data.astype(np.float32)
-                        
-                        # Get the transform for the clipped data
-                        clipped_transform = rasterio.windows.transform(window, src.transform)
-                        
-                        # Update metadata for the clipped output
-                        new_meta = {
-                            'driver': 'GTiff',
-                            'height': clipped_data.shape[0],
-                            'width': clipped_data.shape[1],
-                            'count': 1,
-                            'dtype': 'float32',
-                            'crs': src.crs,
-                            'transform': clipped_transform,
-                            'nodata': -9999,
-                            'compress': 'none'
-                        }
-                        with rasterio.open(output_path, 'w', **new_meta) as dst:
-                            dst.write(clipped_data, 1)
-                else:
-                    # Create output GeoTIFF without clipping
-                    driver = gdal.GetDriverByName('GTiff')
-                    dst_ds = driver.CreateCopy(output_path, src_ds, 0)
-                    
-                    # Get the band
-                    band = dst_ds.GetRasterBand(1)
-                    data = band.ReadAsArray()
-                    # Explicitly convert to float32
-                    data = data.astype(np.float32)
-                    
-                    # Set values >1000 or <0 to -9999
-                    data = np.where((data > 1000) | (data < 0), -9999, data)
-                    
-                    # Set nodata value
-                    band.SetNoDataValue(-9999)
-                    
-                    # Write the data as float32
-                    band.WriteArray(data)
-                    
-                    # Close datasets
-                    dst_ds = None
-                
-                src_ds = None
-                
-            except Exception as e:
+
+    if num_processes == 1:
+        # Sequential processing if num_processes is 1
+        for grib_file in tqdm(grib2_files, desc="Converting MRMS to GeoTIFF"):
+            base_name, error = _process_single_file(grib_file, output_folder, basin_clipping, expanded_bounds)
+            if error:
+                tqdm.write(f"Error processing {base_name}: {error}")
                 failed_files += 1
-                tqdm.write(f"Error processing {base_name}: {str(e)[:100]}...")
-            
-            pbar.update(1)
+    else:
+        # Parallel processing using multiple processes
+        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+            futures = {executor.submit(_process_single_file, grib_file, output_folder,
+                                         basin_clipping, expanded_bounds): grib_file 
+                       for grib_file in grib2_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Converting MRMS to GeoTIFF"):
+                base_name, error = future.result()
+                if error:
+                    tqdm.write(f"Error processing {base_name}: {error}")
+                    failed_files += 1
     
-    # Process files in output folder to ensure correct format
+    # Post-process the generated TIFF files to ensure proper format (sequentially)
     tif_files = glob.glob(os.path.join(output_folder, '*.tif'))
     print(f"Ensuring proper format for {len(tif_files)} output files")
     
-    with tqdm(total=len(tif_files), desc="Checking output formats") as pbar:
-        for file_path in tif_files:
-            try:
-                with rasterio.open(file_path) as src:
-                    data = src.read(1)
-                    # Set values >1000 or <0 to -9999
-                    data = np.where((data > 1000) | (data < 0), -9999, data)
-                    data_float32 = data.astype('float32')
-                    meta = src.meta.copy()
-                    meta.update({'dtype': 'float32', 'nodata': -9999, 'compress': 'none'})
-                    
-                with rasterio.open(file_path, 'w', **meta) as dst:
-                    dst.write(data_float32, 1)
-            except Exception as e:
-                tqdm.write(f"Error formatting {os.path.basename(file_path)}: {str(e)[:100]}...")
-            
-            pbar.update(1)
+    for file_path in tqdm(tif_files, desc="Checking output formats"):
+        try:
+            with rasterio.open(file_path) as src:
+                data = src.read(1)
+                data = np.where((data > 1000) | (data < 0), -9999, data)
+                data_float32 = data.astype('float32')
+                meta = src.meta.copy()
+                meta.update({'dtype': 'float32', 'nodata': -9999, 'compress': 'none'})
+            with rasterio.open(file_path, 'w', **meta) as dst:
+                dst.write(data_float32, 1)
+        except Exception as e:
+            print(f"Error formatting {os.path.basename(file_path)}: {str(e)[:100]}...")
     
     print(f"MRMS conversion completed. Output files saved to {os.path.abspath(output_folder)}")
     if failed_files > 0:
