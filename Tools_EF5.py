@@ -1770,7 +1770,7 @@ NAME=MultiSensor_QPE_01H_Pass2_00.00_YYYYMMDD-HH0000.tif
 
 [PETForcing PET]
 TYPE=TIF
-UNIT=mm/d
+UNIT=mm/100d
 FREQ=d
 LOC={pet_path}
 NAME=et{time_begin.strftime('%y')}MMDD.tif
@@ -1783,10 +1783,10 @@ OUTPUTTS=TRUE
 BASINAREA={basin_area}
 WANTCO=TRUE
 
-[Basin CF]
+[Basin 0]
 GAUGE={gauge_id}
 
-[CrestParamSet CFcrest]
+[CrestParamSet CrestParam]
 gauge={gauge_id}
 wm={wm}
 b={b}
@@ -1795,7 +1795,7 @@ ke={ke}
 fc={fc}
 iwu={iwu}
 
-[kwparamset CFkw]
+[kwparamset KWParam]
 gauge={gauge_id}
 under={under}
 leaki={leaki}
@@ -1805,23 +1805,23 @@ alpha={alpha}
 beta={beta}
 alpha0={alpha0}
 
-[Task CFsimu]
+[Task Simu]
 STYLE=SIMU
 MODEL=CREST
 ROUTING=KW
-BASIN=CF
+BASIN=0
 PRECIP=MRMS
 PET=PET
 OUTPUT={output_dir}
-PARAM_SET=CFcrest
-ROUTING_PARAM_Set=CFkw
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
 TIMESTEP=1h
 
 TIME_BEGIN={time_begin.strftime('%Y%m%d%H%M')}
 TIME_END={time_end.strftime('%Y%m%d%H%M')}
 
 [Execute]
-TASK=CFsimu
+TASK=Simu
 """
 
     # Write the content to the control file
