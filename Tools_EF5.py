@@ -892,6 +892,8 @@ def visualize_pet(date_for_visualization, data_path):
         # Open the raster file
         with rasterio.open(pet_tif_path) as src:
             pet_data = src.read(1)  # Read the first band
+            # Divide by 100 as the source file contains values that are 100x the actual values
+            pet_data = pet_data / 100.0
             transform = src.transform  # Get the transform from the source
             
             # Create a figure for visualization with geographic features
