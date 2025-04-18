@@ -1404,6 +1404,8 @@ def plot_watershed_with_gauges(basin_shp_path, gauge_meta_path):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=8)
     
     # Add watershed boundary to the map
+    gdf_web = gdf_web.drop(columns=gdf_web.select_dtypes(include=["datetime64[ns]"]).columns)
+
     folium.GeoJson(
         gdf_web.to_crs(epsg=4326),
         name='Watershed Boundary',
