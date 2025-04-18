@@ -1374,14 +1374,14 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
     
     return Basin_Area
 
-def plot_watershed_with_gauges(shp_file_path, gauge_meta_path):
+def plot_watershed_with_gauges(basin_shp_path, gauge_meta_path):
     """
     Plot watershed with USGS gauge stations.
     
     Parameters:
     -----------
-    shp_file_path : str
-        Path to the directory containing the watershed shapefile (Basin_selected_5.shp)
+    basin_shp_path : str
+        Path to the watershed shapefile
     gauge_meta_path : str
         Path to the USGS gauge metadata CSV file
     
@@ -1390,7 +1390,7 @@ def plot_watershed_with_gauges(shp_file_path, gauge_meta_path):
     None
     """
     # Load the watershed shapefile
-    watershed_shp = os.path.join(shp_file_path, 'Basin_selected_5.shp')
+    watershed_shp = basin_shp_path
     gdf_web = gpd.read_file(watershed_shp).to_crs(epsg=3857)
     
     # Calculate centroid in a projected CRS first, then convert to WGS84 (EPSG:4326)
@@ -1475,7 +1475,7 @@ def plot_watershed_with_gauges(shp_file_path, gauge_meta_path):
             ).add_to(m)
         
         # Update the map save
-        html_path = os.path.join(shp_file_path, 'basin_map_with_gauges.html')
+        html_path = 'basin_map_with_gauges.html'
         m.save(html_path)
         
         # Set map extent to focus on the watershed
@@ -1513,7 +1513,7 @@ def plot_watershed_with_gauges(shp_file_path, gauge_meta_path):
         plt.show()
         
         # Save the map even if no gauges found
-        html_path = os.path.join(shp_file_path, 'basin_map_with_gauges.html')
+        html_path = 'basin_map_with_gauges.html'
         m.save(html_path)
         
         print("No USGS gauge stations found within the watershed boundary.")
@@ -1710,7 +1710,9 @@ def generate_control_file(
     beta,
     alpha0,
     
-    control_file_path='control.txt'
+    control_file_path='control.txt',
+    grid_on=False,
+
 ):
     """
     Generate a control.txt file for CREST model with variable parameters.
@@ -1741,6 +1743,7 @@ def generate_control_file(
         beta (float): KW parameter - Exponent in channel velocity equation
         alpha0 (float): KW parameter - Base flow velocity
         control_file_path (str): Path to save the control file
+        grid_on (bool): Whether to output grid files for streamflow
         
     Returns:
         str: Absolute path to the generated control file
@@ -1751,6 +1754,29 @@ def generate_control_file(
     pet_path = os.path.abspath(pet_path)
     usgs_data_path = os.path.abspath(usgs_data_path)
     output_dir = os.path.abspath(output_dir)
+    
+    # Prepare the Task Simu section with optional output_grids parameter
+    task_simu = """[Task Simu]
+STYLE=SIMU
+MODEL=CREST
+ROUTING=KW
+BASIN=0
+PRECIP=MRMS
+PET=PET
+OUTPUT={output_dir}
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
+TIMESTEP=1h
+"""
+    
+    # Add OUTPUT_GRIDS parameter if grid_on is True
+    if grid_on:
+        task_simu += "OUTPUT_GRIDS=STREAMFLOW\n"
+    
+    task_simu += """
+TIME_BEGIN={time_begin}
+TIME_END={time_end}
+"""
     
     control_content = f"""[Basic]
 DEM={basic_data_path}/dem_clip.tif
@@ -1805,20 +1831,11 @@ alpha={alpha}
 beta={beta}
 alpha0={alpha0}
 
-[Task Simu]
-STYLE=SIMU
-MODEL=CREST
-ROUTING=KW
-BASIN=0
-PRECIP=MRMS
-PET=PET
-OUTPUT={output_dir}
-PARAM_SET=CrestParam
-ROUTING_PARAM_Set=KWParam
-TIMESTEP=1h
-
-TIME_BEGIN={time_begin.strftime('%Y%m%d%H%M')}
-TIME_END={time_end.strftime('%Y%m%d%H%M')}
+{task_simu.format(
+    output_dir=output_dir,
+    time_begin=time_begin.strftime('%Y%m%d%H%M'),
+    time_end=time_end.strftime('%Y%m%d%H%M')
+)}
 
 [Execute]
 TASK=Simu
