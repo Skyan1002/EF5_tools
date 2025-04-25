@@ -52,6 +52,9 @@ def download_mrms_precipitation(start_date, end_date, download_folder='../MRMS_p
     print(f"Downloading MRMS precipitation data from {start_date} to {end_date}")
     print(f"Files will be saved to: {os.path.abspath(download_folder)}")
     
+    # Date threshold for file format change (October 15, 2020)
+    format_change_date = datetime(2020, 10, 15)
+    
     # Loop through each hourly timestamp in the date range
     current_time = start_date
     failed_downloads = 0
@@ -63,12 +66,22 @@ def download_mrms_precipitation(start_date, end_date, download_folder='../MRMS_p
             month_str = current_time.strftime('%m')
             day_str = current_time.strftime('%d')
             hour_str = current_time.strftime('%H')
-
+            
+            # Determine file format based on date
+            if current_time < format_change_date:
+                # Before October 15, 2020: GaugeCorr format
+                product_dir = "GaugeCorr_QPE_01H"
+                file_prefix = "GaugeCorr_QPE_01H"
+            else:
+                # October 15, 2020 and after: MultiSensor format
+                product_dir = "MultiSensor_QPE_01H_Pass2"
+                file_prefix = "MultiSensor_QPE_01H_Pass2"
+            
             # Construct the file name
-            file_name = f"MultiSensor_QPE_01H_Pass2_00.00_{year_str}{month_str}{day_str}-{hour_str}0000.grib2.gz"
+            file_name = f"{file_prefix}_00.00_{year_str}{month_str}{day_str}-{hour_str}0000.grib2.gz"
             
             # Construct the full download URL
-            file_url = f"{base_url}{year_str}/{month_str}/{day_str}/mrms/ncep/MultiSensor_QPE_01H_Pass2/{file_name}"
+            file_url = f"{base_url}{year_str}/{month_str}/{day_str}/mrms/ncep/{product_dir}/{file_name}"
                         
             # Define the full local file path
             output_file = os.path.join(download_folder, file_name)
@@ -812,8 +825,15 @@ def visualize_mrms(date_for_visualization, data_path):
     # Format the MRMS filename based on the visualization date
     formatted_date = date_for_visualization.strftime('%Y%m%d-%H%M%S')
     hour_str = date_for_visualization.strftime('%H')
-    mrms_tif_name = f'MultiSensor_QPE_01H_Pass2_00.00_{formatted_date[:8]}-{hour_str}0000.tif'
     
+    # Determine file format based on date
+    format_change_date = datetime(2020, 10, 15)
+    if date_for_visualization < format_change_date:
+        # Before October 15, 2020: GaugeCorr format
+        mrms_tif_name = f'GaugeCorr_QPE_01H_00.00_{formatted_date[:8]}-{hour_str}0000.tif'
+    else:
+        # October 15, 2020 and after: MultiSensor format
+        mrms_tif_name = f'MultiSensor_QPE_01H_Pass2_00.00_{formatted_date[:8]}-{hour_str}0000.tif'
     mrms_tif_path = os.path.join(data_path, mrms_tif_name)
     
     if os.path.exists(mrms_tif_path):
@@ -1374,6 +1394,43 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
     
     return Basin_Area
 
+def calculate_basin_area(basin_shp_path):
+    """
+    Calculate the area of a watershed basin in square kilometers.
+    
+    Parameters:
+    -----------
+    basin_shp_path : str
+        Path to the watershed basin shapefile
+    
+    Returns:
+    --------
+    float
+        Area of the basin in square kilometers
+    """
+    # Load the watershed shapefile
+    gdf = gpd.read_file(basin_shp_path)
+    
+    # Ensure the GeoDataFrame is in a projected CRS for accurate area calculation
+    # If it's in geographic coordinates (like EPSG:4326), reproject to a suitable projected CRS
+    if gdf.crs.is_geographic:
+        # Get the UTM zone for the centroid of the basin for accurate area calculation
+        centroid = gdf.geometry.unary_union.centroid
+        utm_zone = int(((centroid.x + 180) / 6) % 60) + 1
+        hemisphere = 'north' if centroid.y >= 0 else 'south'
+        utm_epsg = 32600 + utm_zone if hemisphere == 'north' else 32700 + utm_zone
+        
+        # Reproject to the appropriate UTM zone
+        gdf = gdf.to_crs(epsg=utm_epsg)
+    
+    # Calculate area in square meters and convert to square kilometers
+    area_m2 = gdf.geometry.area.sum()
+    area_km2 = area_m2 / 1_000_000  # Convert m² to km²
+    
+    print(f"Basin area: {area_km2:.2f} km²")
+    
+    return area_km2
+
 def plot_watershed_with_gauges(basin_shp_path, gauge_meta_path):
     """
     Plot watershed with USGS gauge stations.
@@ -1780,6 +1837,15 @@ TIME_BEGIN={time_begin}
 TIME_END={time_end}
 """
     
+    # Determine file format based on date
+    format_change_date = datetime(2020, 10, 15)
+    if time_begin < format_change_date:
+        # Before October 15, 2020: GaugeCorr format
+        mrms_file_name = "GaugeCorr_QPE_01H_00.00_YYYYMMDD-HH0000.tif"
+    else:
+        # October 15, 2020 and after: MultiSensor format
+        mrms_file_name = "MultiSensor_QPE_01H_Pass2_00.00_YYYYMMDD-HH0000.tif"
+    
     control_content = f"""[Basic]
 DEM={basic_data_path}/dem_clip.tif
 DDM={basic_data_path}/fdir_clip.tif
@@ -1794,7 +1860,7 @@ TYPE=TIF
 UNIT=mm/h
 FREQ=1h
 LOC={mrms_path}
-NAME=MultiSensor_QPE_01H_Pass2_00.00_YYYYMMDD-HH0000.tif
+NAME={mrms_file_name}
 
 [PETForcing PET]
 TYPE=TIF
