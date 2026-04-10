@@ -1312,7 +1312,19 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
         'f': 'geojson'
     }
 
-    response = requests.get(wbd_url, params=params)
+    response = requests.get(
+        wbd_url,
+        params=params,
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+
+    print("URL:", response.url)
+    print("status_code:", response.status_code)
+    print("content-type:", response.headers.get("Content-Type"))
+    print("body preview:", response.text[:500])
+
+    response.raise_for_status()
     data = response.json()
 
     # Step 2: Save as local GeoJSON and read with GeoPandas
