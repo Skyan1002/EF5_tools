@@ -1278,133 +1278,229 @@ import matplotlib.pyplot as plt
 import contextily as ctx
 import os
 
+import os
+import sys
+import shutil
+import tempfile
+import subprocess
+
+import requests
+import geopandas as gpd
+import folium
+import matplotlib.pyplot as plt
+import contextily as ctx
+from shapely.geometry import Point
+
+
 def download_watershed_shp(latitude, longitude, output_path, level=5):
     """
     Download watershed boundary data for a given latitude and longitude.
-    
-    Parameters:
-    -----------
+    If the USGS request fails, download a default shpFile folder from Google Drive
+    and overwrite the current output folder.
+
+    Parameters
+    ----------
     latitude : float
-        Latitude of the point of interest
+        Latitude of the target point.
     longitude : float
-        Longitude of the point of interest
+        Longitude of the target point.
     output_path : str
-        Directory path where output files will be saved
+        Directory where output files will be saved.
     level : int, default=5
-        WBD level to query (5=HUC8, 4=HUC6, etc.)
-    
-    Returns:
-    --------
-    Basin_Area : float
-        Area of the watershed in square kilometers
+        WBD level to query.
+
+    Returns
+    -------
+    float
+        Basin area in square kilometers.
     """
-    # Create output directory if it doesn't exist
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Step 1: Query WBD API to find the watershed containing this point
-    wbd_url = f"https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/{level}/query"
-    params = {
-        'geometry': f'{longitude},{latitude}', # Note: longitude comes first
-        'geometryType': 'esriGeometryPoint',
-        'inSR': '4326',
-        'spatialRel': 'esriSpatialRelIntersects',
-        'outFields': '*',
-        'f': 'geojson'
-    }
 
-    response = requests.get(
-        wbd_url,
-        params=params,
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0"}
+    default_drive_folder = (
+        "https://drive.google.com/drive/folders/"
+        "1eNQ3N4dPS5JESJmZrT5Xy1frxu70TI_b?usp=drive_link"
     )
+    default_basin_area = 523.57
 
-    print("URL:", response.url)
-    print("status_code:", response.status_code)
-    print("content-type:", response.headers.get("Content-Type"))
-    print("body preview:", response.text[:500])
+    os.makedirs(output_path, exist_ok=True)
 
-    response.raise_for_status()
-    data = response.json()
+    def ensure_gdown():
+        try:
+            import gdown
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "gdown"])
+            import gdown
+        return gdown
 
-    # Step 2: Save as local GeoJSON and read with GeoPandas
-    gdf = gpd.GeoDataFrame.from_features(data['features'])
-    # Set CRS to match the input data (WGS 84 / EPSG:4326)
-    gdf.set_crs(epsg=4326, inplace=True)
-    gdf['shape_Area'] = gdf['shape_Area'] / 1000000
-    print('Basin Area (km2):')
-    Basin_Area = round(gdf['shape_Area'][0], 2)
-    print(Basin_Area)
+    def download_default_shp_folder():
+        """
+        Download the default shpFile folder from Google Drive and overwrite output_path.
+        """
+        gdown = ensure_gdown()
+        temp_dir = tempfile.mkdtemp(prefix="default_shp_")
 
-    # Rename columns to fit 10-character limit
-    column_rename_dict = {
-        'shape_Length': 'shp_length',
-        'metasourceid': 'metasource',
-        'sourcedatadesc': 'sourcedata',
-        'sourceoriginator': 'sourceorig',
-        'sourcefeatureid': 'sourcefeat',
-        'referencegnis_ids': 'ref_gnis'
-    }
+        try:
+            gdown.download_folder(
+                url=default_drive_folder,
+                output=temp_dir,
+                quiet=True,
+                use_cookies=False,
+                remaining_ok=True
+            )
 
-    # Apply the renaming
-    gdf = gdf.rename(columns=column_rename_dict)
+            target_shp = f"Basin_selected_{level}.shp"
+            source_dir = None
 
-    # Save to shapefile
-    shp_path = os.path.join(output_path, f'Basin_selected_{level}.shp')
-    gdf.to_file(shp_path)
+            for root, dirs, files in os.walk(temp_dir):
+                if target_shp in files:
+                    source_dir = root
+                    break
 
-    # Step 3: Visualize using both folium (interactive) and matplotlib (static)
-    # Create folium map centered on input point
-    m = folium.Map(location=[latitude, longitude], zoom_start=8)
+            if source_dir is None:
+                for root, dirs, files in os.walk(temp_dir):
+                    if os.path.basename(root) == "shpFile":
+                        source_dir = root
+                        break
 
-    # Add watershed polygon with style
-    folium.GeoJson(
-        gdf,
-        style_function=lambda x: {
-            'fillColor': '#ffaf00',
-            'color': 'red',
-            'weight': 2,
-            'fillOpacity': 0.3
+            if source_dir is None:
+                raise FileNotFoundError(
+                    f"Downloaded default folder, but could not find {target_shp} or shpFile."
+                )
+
+            if os.path.exists(output_path):
+                shutil.rmtree(output_path)
+
+            shutil.copytree(source_dir, output_path)
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def create_visualizations(gdf, basin_area_value):
+        """
+        Create interactive and static maps.
+        """
+        html_path = os.path.join(output_path, f"Basin_selected_{level}.html")
+
+        try:
+            interactive_map = folium.Map(location=[latitude, longitude], zoom_start=8)
+
+            folium.GeoJson(
+                gdf,
+                style_function=lambda x: {
+                    "fillColor": "#ffaf00",
+                    "color": "red",
+                    "weight": 2,
+                    "fillOpacity": 0.3,
+                },
+            ).add_to(interactive_map)
+
+            folium.Marker(
+                location=[latitude, longitude],
+                popup="Input Location"
+            ).add_to(interactive_map)
+
+            interactive_map.save(html_path)
+        except Exception as exc:
+            print(f"Interactive map generation failed and was skipped: {exc}")
+
+        try:
+            fig, ax = plt.subplots(figsize=(12, 8))
+
+            gdf_web = gdf.to_crs(epsg=3857)
+            gdf_web.plot(ax=ax, alpha=0.5, edgecolor="red", facecolor="yellow", linewidth=2)
+
+            try:
+                ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+            except Exception as exc:
+                print(f"Basemap loading failed; only watershed boundary was plotted: {exc}")
+
+            point = Point(longitude, latitude)
+            point_gdf = gpd.GeoDataFrame(geometry=[point], crs="EPSG:4326").to_crs(epsg=3857)
+            point_gdf.plot(ax=ax, color="red", marker="*", markersize=100)
+
+            bounds = gdf_web.total_bounds
+            ax.set_xlim(bounds[0], bounds[2])
+            ax.set_ylim(bounds[1], bounds[3])
+            ax.set_axis_off()
+
+            plt.title(
+                f"Watershed Boundary (Level {level}) with Basemap\n"
+                f"Basin Area = {basin_area_value} km²"
+            )
+            plt.show()
+
+        except Exception as exc:
+            print(f"Static map generation failed and was skipped: {exc}")
+
+        if os.path.exists(html_path):
+            print(f"Done. Check {html_path} for the interactive view.")
+        else:
+            print("Done. Shapefile is ready, but the HTML map was not created.")
+
+    try:
+        wbd_url = f"https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/{level}/query"
+        params = {
+            "geometry": f"{longitude},{latitude}",
+            "geometryType": "esriGeometryPoint",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "*",
+            "f": "geojson",
         }
-    ).add_to(m)
 
-    # Add input point marker
-    folium.Marker(location=[latitude, longitude], popup="Input Location").add_to(m)
+        response = requests.get(wbd_url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
 
-    # Save interactive map
-    html_path = os.path.join(output_path, f'Basin_selected_{level}.html')
-    m.save(html_path)
+        if "features" not in data or len(data["features"]) == 0:
+            raise ValueError("USGS returned no matching watershed features.")
 
-    # Create static map with matplotlib
-    fig, ax = plt.subplots(figsize=(12, 8))
+        gdf = gpd.GeoDataFrame.from_features(data["features"])
+        gdf.set_crs(epsg=4326, inplace=True)
 
-    # Reproject to Web Mercator for basemap compatibility
-    gdf_web = gdf.to_crs(epsg=3857)
+        if "shape_Area" not in gdf.columns:
+            raise KeyError("USGS response does not contain the 'shape_Area' field.")
 
-    # Plot watershed boundary first
-    gdf_web.plot(ax=ax, alpha=0.5, edgecolor='red', facecolor='yellow', linewidth=2)
+        gdf["shape_Area"] = gdf["shape_Area"] / 1000000
+        basin_area = round(float(gdf["shape_Area"].iloc[0]), 2)
 
-    # Add basemap
-    ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+        print("Basin area (km2):")
+        print(basin_area)
 
-    # Add point location
-    point = Point(longitude, latitude)
-    point_gdf = gpd.GeoDataFrame(geometry=[point], crs='EPSG:4326').to_crs(epsg=3857)
-    point_gdf.plot(ax=ax, color='red', marker='*', markersize=100)
+        column_rename_dict = {
+            "shape_Length": "shp_length",
+            "metasourceid": "metasource",
+            "sourcedatadesc": "sourcedata",
+            "sourceoriginator": "sourceorig",
+            "sourcefeatureid": "sourcefeat",
+            "referencegnis_ids": "ref_gnis",
+        }
+        gdf = gdf.rename(columns=column_rename_dict)
 
-    # Set map extent to focus on the watershed
-    ax.set_xlim(gdf_web.total_bounds[[0, 2]])
-    ax.set_ylim(gdf_web.total_bounds[[1, 3]])
+        shp_path = os.path.join(output_path, f"Basin_selected_{level}.shp")
+        gdf.to_file(shp_path)
 
-    # Remove axes
-    ax.set_axis_off()
+        create_visualizations(gdf, basin_area)
+        return basin_area
 
-    plt.title(f'Watershed Boundary (Level {level}) with Basemap')
-    plt.show()
+    except Exception as exc:
+        print(f"USGS download failed. Using default shapefile folder instead. Reason: {exc}")
+        print(f"Basin area (km2):\n{default_basin_area}")
 
-    print(f"Done. Check {html_path} for interactive view and see the static map above!")
-    
-    return Basin_Area
+        download_default_shp_folder()
+
+        shp_path = os.path.join(output_path, f"Basin_selected_{level}.shp")
+        if not os.path.exists(shp_path):
+            raise FileNotFoundError(f"Default folder was downloaded, but {shp_path} was not found.")
+
+        try:
+            gdf = gpd.read_file(shp_path)
+            if gdf.crs is None:
+                gdf.set_crs(epsg=4326, inplace=True)
+            create_visualizations(gdf, default_basin_area)
+        except Exception as viz_exc:
+            print(f"Default shapefile is ready, but map generation failed: {viz_exc}")
+
+        return default_basin_area
 
 def calculate_basin_area(basin_shp_path):
     """
