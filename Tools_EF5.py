@@ -10,11 +10,18 @@
 # ======================================
 
 import os
-import requests
-import gzip
+import re
+import sys
 import shutil
 import tarfile
+import tempfile
+import subprocess
+import gzip
 import glob
+import io
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -23,8 +30,10 @@ import rasterio
 from osgeo import gdal
 import geopandas as gpd
 from rasterio.windows import from_bounds
-import io
+import folium
 import matplotlib.pyplot as plt
+import contextily as ctx
+from shapely.geometry import Point
 
 def download_mrms_precipitation(start_date, end_date, download_folder='../MRMS_precipitation'):
     """
@@ -354,15 +363,8 @@ def download_pet_data(start_date, end_date, download_folder='../PET_data'):
 #     if failed_files > 0:
 #         print(f"Note: {failed_files} files failed to process")
 
-import os
-import glob
-import numpy as np
-import geopandas as gpd
-from osgeo import gdal
-import rasterio
-from rasterio.windows import from_bounds
-from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
 
 def _process_single_file(grib_file, output_folder, basin_clipping, expanded_bounds):
     """
@@ -945,130 +947,119 @@ def visualize_clipped_data_with_basin(clip_data_folder, basin_shp_path):
     basin_shp_path : str
         Path to the basin shapefile
     """
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-    from rasterio.plot import show
     import matplotlib.colors as colors
     import matplotlib.patches as mpatches
-    
+
+    # ESRI flow-direction encoding: value -> compass label
+    _ESRI_DIR_LABELS = {1: 'E', 2: 'SE', 4: 'S', 8: 'SW',
+                        16: 'W', 32: 'NW', 64: 'N', 128: 'NE'}
+    _ESRI_DIRS = np.array(sorted(_ESRI_DIR_LABELS.keys()), dtype=float)
+
     # Read the basin shapefile
     basin_gdf = gpd.read_file(basin_shp_path)
-    
+
     # Get all TIF files in the clipped data folder
     tif_files = glob.glob(os.path.join(clip_data_folder, '*.tif'))
-    
+
     if not tif_files:
         print(f"No TIF files found in {clip_data_folder}")
         return False
-    
+
     print(f"Found {len(tif_files)} TIF files in {clip_data_folder}")
-    
-    # Map file names to descriptive titles and custom colormaps
+
+    # Map file names to descriptive titles and colormaps
     file_info = {
-        'facc_clip.tif': {
-            'title': 'Flow Accumulation Map (FAM)',
-            'cmap': 'Blues',
-            'norm': colors.LogNorm()  # Logarithmic scale for flow accumulation
-        },
-        'dem_clip.tif': {
-            'title': 'Digital Elevation Model (DEM)',
-            'cmap': 'terrain',
-            'norm': None  # Linear scale for elevation
-        },
-        'fdir_clip.tif': {
-            'title': 'Drainage Direction Map (DDM)',
-            'cmap': None,  # Will be set to custom colormap for directions
-            'norm': None
-        }
+        'facc_clip.tif': {'title': 'Flow Accumulation Map (FAM)',  'cmap': 'Blues'},
+        'dem_clip.tif':  {'title': 'Digital Elevation Model (DEM)', 'cmap': 'terrain'},
+        'fdir_clip.tif': {'title': 'Drainage Direction Map (DDM)',  'cmap': None},
     }
-    
-    # Display up to 3 TIF files with basin boundary in a single row
-    if len(tif_files) > 0:
-        # Create a figure with subplots in a single row with reduced spacing
-        fig, axes = plt.subplots(1, min(3, len(tif_files)), figsize=(15, 5), 
-                                 subplot_kw={'projection': ccrs.PlateCarree()})
-        
-        # Reduce horizontal spacing between subplots
-        plt.subplots_adjust(wspace=0)
-        
-        # If only one file, axes won't be an array
-        if len(tif_files) == 1:
-            axes = [axes]
-        
-        # Process each file and plot in the corresponding subplot
-        for i, (tif_file, ax) in enumerate(zip(tif_files[:3], axes)):
-            file_name = os.path.basename(tif_file)
-            print(f"Visualizing: {file_name}")
-            
-            with rasterio.open(tif_file) as src:
-                data = src.read(1)
-                transform = src.transform
-                
-                # Add geographic features
-                ax.add_feature(cfeature.COASTLINE)
-                ax.add_feature(cfeature.BORDERS, linestyle=':')
-                ax.add_feature(cfeature.STATES, linestyle=':')
-                
-                # Get custom visualization settings for this file
-                file_settings = file_info.get(file_name, {
-                    'title': file_name,
-                    'cmap': 'viridis',
-                    'norm': None
-                })
-                
-                # Special handling for flow direction map to use discrete colors
-                if file_name == 'fdir_clip.tif':
-                    # Get unique values in the direction data
-                    unique_values = np.unique(data)
-                    unique_values = unique_values[~np.isnan(unique_values)]
-                    
-                    # Create a custom colormap for the unique direction values
-                    n_values = len(unique_values)
-                    colors_list = plt.cm.tab10(np.linspace(0, 1, n_values))
-                    
-                    # Create a custom discrete colormap
-                    cmap = colors.ListedColormap(colors_list)
-                    bounds = np.concatenate([unique_values - 0.5, [unique_values[-1] + 0.5]])
-                    norm = colors.BoundaryNorm(bounds, cmap.N)
-                    
-                    # Show the raster with discrete colors
-                    img = show(data, ax=ax, transform=transform, cmap=cmap, norm=norm)
-                    
-                    # Create a legend for direction values
-                    legend_patches = []
-                    for i, val in enumerate(unique_values):
-                        patch = mpatches.Patch(color=colors_list[i], label=f'Direction {int(val)}')
-                        legend_patches.append(patch)
-                    
-                    # Add the legend
-                    ax.legend(handles=legend_patches, loc='lower right', fontsize='small')
-                else:
-                    # Show other raster data with standard colormap
-                    img = show(data, ax=ax, transform=transform, 
-                              cmap=file_settings['cmap'], norm=file_settings['norm'])
-                    
-                    # Fix colorbar issue by directly creating it from the image
-                    if hasattr(img, 'get_images') and img.get_images():
-                        # For matplotlib 3.5+
-                        cbar = plt.colorbar(img.get_images()[0], ax=ax, shrink=0.7)
-                    elif hasattr(img, 'images') and img.images:
-                        # For older matplotlib versions
-                        cbar = plt.colorbar(img.images[0], ax=ax, shrink=0.7)
-                    
-                    # Set appropriate colorbar label
-                    if file_name == 'facc_clip.tif':
-                        cbar.set_label('Flow Accumulation (log scale)')
-                    elif file_name == 'dem_clip.tif':
-                        cbar.set_label('Elevation (m)')
-                
-                # Add basin boundary with black color
-                basin_gdf.boundary.plot(ax=ax, color='black', linewidth=2)
-                
-                # Add title using the mapping
+
+    n_plots = min(3, len(tif_files))
+    fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 7))
+    if n_plots == 1:
+        axes = [axes]
+    plt.subplots_adjust(wspace=0.3)
+
+    for ax, tif_file in zip(axes, tif_files[:3]):
+        file_name = os.path.basename(tif_file)
+        print(f"Visualizing: {file_name}")
+
+        file_settings = file_info.get(file_name, {
+            'title': file_name, 'cmap': 'viridis'
+        })
+
+        with rasterio.open(tif_file) as src:
+            data = src.read(1).astype(float)
+            nodata_val = src.nodata
+            bounds = src.bounds
+
+        extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+
+        # ------ fdir: discrete colour per ESRI direction ------
+        if file_name == 'fdir_clip.tif':
+            if nodata_val is not None:
+                data[data == nodata_val] = np.nan
+            data[~np.isin(data, _ESRI_DIRS) & ~np.isnan(data)] = np.nan
+
+            present = np.array(
+                [d for d in _ESRI_DIRS if np.any(data == d)], dtype=float
+            )
+            if present.size == 0:
                 ax.set_title(file_settings['title'], fontsize=10)
-        
-        plt.tight_layout()
-        plt.show()
+                continue
+
+            palette = plt.cm.tab10(np.linspace(0, 1, len(present)))
+            cmap_d = colors.ListedColormap(palette)
+            bnds  = np.concatenate([present - 0.5, [present[-1] + 0.5]])
+            norm_d = colors.BoundaryNorm(bnds, cmap_d.N)
+
+            masked = np.ma.masked_invalid(data)
+            cmap_d.set_bad('white')
+            ax.imshow(masked, cmap=cmap_d, norm=norm_d,
+                      extent=extent, origin='upper', interpolation='nearest')
+
+            patches = [
+                mpatches.Patch(color=palette[i],
+                               label=f"{_ESRI_DIR_LABELS[int(d)]} ({int(d)})")
+                for i, d in enumerate(present)
+            ]
+            ax.legend(handles=patches, title='Flow Direction',
+                      loc='lower right', fontsize='small', title_fontsize='small')
+
+        # ------ facc / dem: continuous colormap ------
+        else:
+            if nodata_val is not None:
+                data[data == nodata_val] = np.nan
+
+            valid = data[~np.isnan(data)]
+            if valid.size == 0:
+                ax.set_title(file_settings['title'], fontsize=10)
+                continue
+
+            if file_name == 'facc_clip.tif':
+                # Log scale; vmin/vmax set from actual data to avoid nodata distortion
+                norm = colors.LogNorm(vmin=max(valid.min(), 1), vmax=valid.max())
+                cbar_label = 'Flow Accumulation (cells, log scale)'
+            else:
+                norm = None
+                cbar_label = 'Elevation (m)'
+
+            cmap_obj = plt.get_cmap(file_settings['cmap']).copy()
+            cmap_obj.set_bad('white')
+            masked = np.ma.masked_invalid(data)
+            img = ax.imshow(masked, cmap=cmap_obj, norm=norm,
+                            extent=extent, origin='upper')
+            plt.colorbar(img, ax=ax, shrink=0.7, pad=0.02, label=cbar_label)
+
+        # ------ basin boundary ------
+        basin_gdf.boundary.plot(ax=ax, color='black', linewidth=1.5)
+
+        ax.set_title(file_settings['title'], fontsize=10)
+        ax.set_xlabel('Longitude', fontsize=8)
+        ax.set_ylabel('Latitude', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
 # Visualize the USGS data
 def visualize_usgs_data(site_code, df_usgs):
     """
@@ -1270,33 +1261,144 @@ def create_output_directory(output_dir='../Output'):
 # Basin Selection and Processing Functions
 # ======================================
 
-import requests
-import geopandas as gpd
-import folium
-from shapely.geometry import Point
-import matplotlib.pyplot as plt
-import contextily as ctx
-import os
+# Mapping from legacy WBD "level" numbers to HUC digit counts used by the fabric API.
+_LEVEL_TO_HUC_DIGITS = {1: 2, 2: 4, 3: 6, 4: 8, 5: 10, 6: 12}
 
-import os
-import sys
-import shutil
-import tempfile
-import subprocess
+_WBD_SUPPORTED_HUC_DIGITS = {2, 4, 6, 8, 10, 12}
+_WBD_FABRIC_BASE = "https://api.water.usgs.gov/fabric/pygeoapi"
 
-import requests
-import geopandas as gpd
-import folium
-import matplotlib.pyplot as plt
-import contextily as ctx
-from shapely.geometry import Point
 
+def _build_wbd_session():
+    """Build a requests Session with retry/backoff logic for WBD API calls."""
+    retry = Retry(
+        total=6,
+        connect=6,
+        read=6,
+        backoff_factor=1.2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "watershed-fetcher/1.0 (python requests; robust client)"
+    })
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _get_wbd_json(session, url, params=None, timeout=60):
+    """Perform a GET request and return parsed JSON; raise on empty or non-JSON body."""
+    resp = session.get(url, params=params, timeout=timeout)
+    resp.raise_for_status()
+    text = resp.text.strip()
+    if not text:
+        raise RuntimeError(f"Empty response from {resp.url}")
+    ctype = resp.headers.get("content-type", "")
+    try:
+        return resp.json()
+    except Exception as exc:
+        preview = text[:300].replace("\n", " ")
+        raise RuntimeError(
+            f"Non-JSON response from {resp.url} "
+            f"(status={resp.status_code}, content-type={ctype}): {preview}"
+        ) from exc
+
+
+def _get_latest_wbd_collection(session, huc_digits):
+    """
+    Auto-discover the most recent WBD collection name for the given HUC digit count.
+
+    For example, huc_digits=10 may return 'wbd10_20250107'.
+    """
+    if huc_digits not in _WBD_SUPPORTED_HUC_DIGITS:
+        raise ValueError(
+            f"huc_digits must be one of {sorted(_WBD_SUPPORTED_HUC_DIGITS)}, got {huc_digits}"
+        )
+    data = _get_wbd_json(session, f"{_WBD_FABRIC_BASE}/collections", params={"f": "json"})
+    pattern = re.compile(rf"^wbd{huc_digits:02d}_(\d{{8}})$")
+    candidates = []
+    for c in data.get("collections", []):
+        cid = c.get("id", "")
+        m = pattern.match(cid)
+        if m:
+            candidates.append((m.group(1), cid))
+    if not candidates:
+        raise RuntimeError(
+            f"No WBD collection found for HUC{huc_digits} on the fabric API."
+        )
+    candidates.sort()
+    return candidates[-1][1]
+
+
+def _query_watershed_at_point(session, latitude, longitude, huc_digits):
+    """
+    Query the WBD fabric API for the HUC polygon that contains (latitude, longitude).
+
+    Uses an expanding bounding-box strategy to retrieve nearby features, then
+    performs an exact point-in-polygon test locally to return only the containing
+    feature.  When the point falls on a boundary, the smallest overlapping polygon
+    is preferred.
+
+    Returns
+    -------
+    tuple : (GeoDataFrame with one row, collection_id str)
+    """
+    collection_id = _get_latest_wbd_collection(session, huc_digits=huc_digits)
+    url = f"{_WBD_FABRIC_BASE}/collections/{collection_id}/items"
+
+    deltas = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2]
+    last_count = 0
+    for delta in deltas:
+        bbox = (
+            f"{longitude - delta},{latitude - delta},"
+            f"{longitude + delta},{latitude + delta}"
+        )
+        data = _get_wbd_json(
+            session, url, params={"bbox": bbox, "limit": 200, "f": "json"}
+        )
+        feats = data.get("features", [])
+        last_count = len(feats)
+        if not feats:
+            continue
+
+        gdf = gpd.GeoDataFrame.from_features(feats, crs="EPSG:4326")
+        if gdf.empty:
+            continue
+
+        pt = Point(longitude, latitude)
+        contains_mask = gdf.geometry.contains(pt)
+        if contains_mask.any():
+            selected = gdf[contains_mask].copy()
+        else:
+            intersects_mask = gdf.geometry.intersects(pt)
+            selected = gdf[intersects_mask].copy()
+
+        if not selected.empty:
+            if "areasqkm" in selected.columns:
+                selected = selected.sort_values("areasqkm", ascending=True)
+            return selected.iloc[[0]].copy(), collection_id
+
+    raise RuntimeError(
+        f"Could not find containing watershed polygon for point "
+        f"({latitude}, {longitude}) in HUC{huc_digits}. "
+        f"Last bbox candidate count: {last_count}"
+    )
 
 def download_watershed_shp(latitude, longitude, output_path, level=5):
     """
-    Download watershed boundary data for a given latitude and longitude.
-    If the USGS request fails, download a default shpFile folder from Google Drive
-    and overwrite the current output folder.
+    Download watershed boundary data for a given latitude and longitude using
+    the USGS Water Data Fabric pygeoAPI (OGC Features / WBD collections).
+
+    The function auto-discovers the latest WBD collection for the requested HUC
+    level, finds the polygon that contains the input point via an expanding
+    bounding-box query, and saves the result as GeoPackage, GeoJSON, and
+    Shapefile.  Interactive (HTML) and static (PNG) maps are also produced.
+
+    If the API is unreachable or returns no matching feature, the function falls
+    back to downloading a pre-packaged default shapefile folder from Google Drive.
 
     Parameters
     ----------
@@ -1307,14 +1409,14 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
     output_path : str
         Directory where output files will be saved.
     level : int, default=5
-        WBD level to query.
+        WBD level identifier (1–6), mapped internally to HUC digit counts:
+        1→HUC2, 2→HUC4, 3→HUC6, 4→HUC8, 5→HUC10, 6→HUC12.
 
     Returns
     -------
     float
-        Basin area in square kilometers.
+        Basin area in square kilometres.
     """
-
     default_drive_folder = (
         "https://drive.google.com/drive/folders/"
         "1eNQ3N4dPS5JESJmZrT5Xy1frxu70TI_b?usp=drive_link"
@@ -1323,6 +1425,17 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
 
     os.makedirs(output_path, exist_ok=True)
 
+    huc_digits = _LEVEL_TO_HUC_DIGITS.get(level)
+    if huc_digits is None:
+        raise ValueError(
+            f"level must be one of {sorted(_LEVEL_TO_HUC_DIGITS)}, got {level}"
+        )
+
+    stem = f"Basin_selected_{level}"
+
+    # ------------------------------------------------------------------
+    # Inner helpers
+    # ------------------------------------------------------------------
     def ensure_gdown():
         try:
             import gdown
@@ -1332,57 +1445,66 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
         return gdown
 
     def download_default_shp_folder():
-        """
-        Download the default shpFile folder from Google Drive and overwrite output_path.
-        """
+        """Download the default shpFile folder from Google Drive and overwrite output_path."""
         gdown = ensure_gdown()
         temp_dir = tempfile.mkdtemp(prefix="default_shp_")
-
         try:
             gdown.download_folder(
                 url=default_drive_folder,
                 output=temp_dir,
                 quiet=True,
                 use_cookies=False,
-                remaining_ok=True
+                remaining_ok=True,
             )
-
-            target_shp = f"Basin_selected_{level}.shp"
+            target_shp = f"{stem}.shp"
             source_dir = None
-
             for root, dirs, files in os.walk(temp_dir):
                 if target_shp in files:
                     source_dir = root
                     break
-
             if source_dir is None:
                 for root, dirs, files in os.walk(temp_dir):
                     if os.path.basename(root) == "shpFile":
                         source_dir = root
                         break
-
             if source_dir is None:
                 raise FileNotFoundError(
-                    f"Downloaded default folder, but could not find {target_shp} or shpFile."
+                    f"Downloaded default folder but could not find {target_shp} or shpFile."
                 )
-
             if os.path.exists(output_path):
                 shutil.rmtree(output_path)
-
             shutil.copytree(source_dir, output_path)
-
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def create_visualizations(gdf, basin_area_value):
-        """
-        Create interactive and static maps.
-        """
-        html_path = os.path.join(output_path, f"Basin_selected_{level}.html")
+    def save_watershed_shp(gdf):
+        """Save watershed GeoDataFrame to GeoPackage, GeoJSON, and Shapefile."""
+        gpkg_path = os.path.join(output_path, f"{stem}.gpkg")
+        gdf.to_file(gpkg_path, driver="GPKG")
 
+        geojson_path = os.path.join(output_path, f"{stem}.geojson")
+        gdf.to_file(geojson_path, driver="GeoJSON")
+
+        # Shapefile field names must be ≤ 10 characters
+        shp_rename = {
+            "sourceoriginator": "src_orig",
+            "sourcedatadesc":   "src_desc",
+            "sourcefeatureid":  "src_featid",
+            "referencegnis_ids": "ref_gnis",
+            "shape_length":     "shp_len",
+            "shape_area":       "shp_area",
+        }
+        gdf_shp = gdf.rename(columns=shp_rename).copy()
+        gdf_shp.columns = [c if len(c) <= 10 else c[:10] for c in gdf_shp.columns]
+        shp_path = os.path.join(output_path, f"{stem}.shp")
+        gdf_shp.to_file(shp_path, driver="ESRI Shapefile", encoding="utf-8")
+        return shp_path
+
+    def create_visualizations(gdf, basin_area_value):
+        """Create interactive (HTML) and static map for the watershed boundary."""
+        html_path = os.path.join(output_path, f"{stem}.html")
         try:
             interactive_map = folium.Map(location=[latitude, longitude], zoom_start=8)
-
             folium.GeoJson(
                 gdf,
                 style_function=lambda x: {
@@ -1392,42 +1514,34 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
                     "fillOpacity": 0.3,
                 },
             ).add_to(interactive_map)
-
             folium.Marker(
-                location=[latitude, longitude],
-                popup="Input Location"
+                location=[latitude, longitude], popup="Input Location"
             ).add_to(interactive_map)
-
             interactive_map.save(html_path)
         except Exception as exc:
             print(f"Interactive map generation failed and was skipped: {exc}")
 
         try:
             fig, ax = plt.subplots(figsize=(12, 8))
-
             gdf_web = gdf.to_crs(epsg=3857)
             gdf_web.plot(ax=ax, alpha=0.5, edgecolor="red", facecolor="yellow", linewidth=2)
-
             try:
                 ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
             except Exception as exc:
                 print(f"Basemap loading failed; only watershed boundary was plotted: {exc}")
-
-            point = Point(longitude, latitude)
-            point_gdf = gpd.GeoDataFrame(geometry=[point], crs="EPSG:4326").to_crs(epsg=3857)
-            point_gdf.plot(ax=ax, color="red", marker="*", markersize=100)
-
+            pt_gdf = gpd.GeoDataFrame(
+                geometry=[Point(longitude, latitude)], crs="EPSG:4326"
+            ).to_crs(epsg=3857)
+            pt_gdf.plot(ax=ax, color="red", marker="*", markersize=100)
             bounds = gdf_web.total_bounds
             ax.set_xlim(bounds[0], bounds[2])
             ax.set_ylim(bounds[1], bounds[3])
             ax.set_axis_off()
-
             plt.title(
-                f"Watershed Boundary (Level {level}) with Basemap\n"
+                f"Watershed Boundary (HUC{huc_digits}) with Basemap\n"
                 f"Basin Area = {basin_area_value} km²"
             )
             plt.show()
-
         except Exception as exc:
             print(f"Static map generation failed and was skipped: {exc}")
 
@@ -1436,61 +1550,44 @@ def download_watershed_shp(latitude, longitude, output_path, level=5):
         else:
             print("Done. Shapefile is ready, but the HTML map was not created.")
 
+    # ------------------------------------------------------------------
+    # Primary path: USGS Water Data Fabric API
+    # ------------------------------------------------------------------
     try:
-        wbd_url = f"https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/{level}/query"
-        params = {
-            "geometry": f"{longitude},{latitude}",
-            "geometryType": "esriGeometryPoint",
-            "inSR": "4326",
-            "spatialRel": "esriSpatialRelIntersects",
-            "outFields": "*",
-            "f": "geojson",
-        }
+        session = _build_wbd_session()
+        gdf, collection_id = _query_watershed_at_point(
+            session, latitude, longitude, huc_digits
+        )
 
-        response = requests.get(wbd_url, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        if "areasqkm" in gdf.columns and not gdf["areasqkm"].isna().all():
+            basin_area = round(float(gdf.iloc[0]["areasqkm"]), 2)
+        else:
+            basin_area = round(float(gdf.to_crs(epsg=5070).area.iloc[0] / 1e6), 2)
 
-        if "features" not in data or len(data["features"]) == 0:
-            raise ValueError("USGS returned no matching watershed features.")
+        print(f"Selected WBD collection: {collection_id}")
+        print(f"Basin area (km²): {basin_area}")
 
-        gdf = gpd.GeoDataFrame.from_features(data["features"])
-        gdf.set_crs(epsg=4326, inplace=True)
-
-        if "shape_Area" not in gdf.columns:
-            raise KeyError("USGS response does not contain the 'shape_Area' field.")
-
-        gdf["shape_Area"] = gdf["shape_Area"] / 1000000
-        basin_area = round(float(gdf["shape_Area"].iloc[0]), 2)
-
-        print("Basin area (km2):")
-        print(basin_area)
-
-        column_rename_dict = {
-            "shape_Length": "shp_length",
-            "metasourceid": "metasource",
-            "sourcedatadesc": "sourcedata",
-            "sourceoriginator": "sourceorig",
-            "sourcefeatureid": "sourcefeat",
-            "referencegnis_ids": "ref_gnis",
-        }
-        gdf = gdf.rename(columns=column_rename_dict)
-
-        shp_path = os.path.join(output_path, f"Basin_selected_{level}.shp")
-        gdf.to_file(shp_path)
-
+        save_watershed_shp(gdf)
         create_visualizations(gdf, basin_area)
         return basin_area
 
+    # ------------------------------------------------------------------
+    # Fallback: pre-packaged default folder on Google Drive
+    # ------------------------------------------------------------------
     except Exception as exc:
-        print(f"USGS download failed. Using default shapefile folder instead. Reason: {exc}")
-        print(f"Basin area (km2):\n{default_basin_area}")
+        print(
+            f"USGS WBD API download failed; falling back to default shapefile. "
+            f"Reason: {exc}"
+        )
+        print(f"Basin area (km²):\n{default_basin_area}")
 
         download_default_shp_folder()
 
-        shp_path = os.path.join(output_path, f"Basin_selected_{level}.shp")
+        shp_path = os.path.join(output_path, f"{stem}.shp")
         if not os.path.exists(shp_path):
-            raise FileNotFoundError(f"Default folder was downloaded, but {shp_path} was not found.")
+            raise FileNotFoundError(
+                f"Default folder downloaded but {shp_path} was not found."
+            )
 
         try:
             gdf = gpd.read_file(shp_path)
