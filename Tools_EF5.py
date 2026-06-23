@@ -32,6 +32,7 @@ import geopandas as gpd
 from rasterio.windows import from_bounds
 import folium
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import contextily as ctx
 from shapely.geometry import Point
 
@@ -1084,7 +1085,7 @@ def visualize_usgs_data(site_code, df_usgs):
     plt.tight_layout()
     plt.show()
 
-def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot=True, save_path=None):
+def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot=True, save_path=None, obs_file=None):
     """
     Visualize hydrological model results comparing simulated vs observed discharge.
     
@@ -1096,6 +1097,9 @@ def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot
         Whether to display the plot (default: True)
     save_path : str, optional
         Path to save the plot image (default: None, plot is not saved)
+    obs_file : str, optional
+        Path to the original USGS observation CSV. If not provided, the function
+        tries to find USGS_<site_id>_UTC_m3s.csv next to the Output directory.
     """
     
     
@@ -1112,27 +1116,99 @@ def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot
         return False
     
     print(f"Visualizing model results from: {os.path.abspath(ts_file)}")
+
+    # Parse timestamps so sub-hourly observations are shown at their true spacing.
+    time = pd.to_datetime(df['Time'], errors='coerce', utc=True).dt.tz_convert(None)
+    if time.isna().any():
+        print("Error: Unable to parse one or more values in the Time column.")
+        return False
+
+    plot_df = df.copy()
+    plot_df['Time'] = time
+    plot_df['Discharge(m^3 s^-1)'] = pd.to_numeric(plot_df['Discharge(m^3 s^-1)'], errors='coerce')
+    plot_df['Observed(m^3 s^-1)'] = pd.to_numeric(plot_df['Observed(m^3 s^-1)'], errors='coerce')
+    plot_df['Precip(mm h^-1)'] = pd.to_numeric(plot_df['Precip(mm h^-1)'], errors='coerce')
+    plot_df = plot_df.sort_values('Time')
+
+    simulated = plot_df[['Time', 'Discharge(m^3 s^-1)']].dropna()
+    observed = plot_df[['Time', 'Observed(m^3 s^-1)']].dropna()
+    precipitation = plot_df[['Time', 'Precip(mm h^-1)']].dropna()
+
+    x_min = plot_df['Time'].min()
+    x_max = plot_df['Time'].max()
+    site_match = re.search(r'ts\.([^.]+)\.crest\.csv$', os.path.basename(ts_file))
+    if obs_file is None and site_match:
+        site_id = site_match.group(1)
+        ts_dir = os.path.dirname(os.path.abspath(ts_file))
+        parent_dir = os.path.dirname(ts_dir)
+        obs_candidates = [
+            os.path.join(parent_dir, 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(ts_dir, '..', 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(ts_dir, f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(os.getcwd(), '..', 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv')
+        ]
+        for candidate in obs_candidates:
+            candidate = os.path.abspath(candidate)
+            if os.path.exists(candidate):
+                obs_file = candidate
+                break
+
+    if obs_file and os.path.exists(obs_file):
+        try:
+            obs_df = pd.read_csv(obs_file)
+            if {'datetime', 'discharge'}.issubset(obs_df.columns):
+                obs_df['Time'] = pd.to_datetime(obs_df['datetime'], errors='coerce', utc=True).dt.tz_convert(None)
+                obs_df['Observed(m^3 s^-1)'] = pd.to_numeric(obs_df['discharge'], errors='coerce')
+                obs_df = obs_df[['Time', 'Observed(m^3 s^-1)']].dropna().sort_values('Time')
+                observed_from_file = obs_df[(obs_df['Time'] >= x_min) & (obs_df['Time'] <= x_max)]
+                if not observed_from_file.empty:
+                    observed = observed_from_file
+                    print(f"Using observed discharge from: {os.path.abspath(obs_file)}")
+            else:
+                print(f"Warning: Observation file missing datetime/discharge columns: {obs_file}")
+        except Exception as e:
+            print(f"Warning: Could not read observation file {obs_file}: {str(e)}")
+
+    precip_time_deltas = precipitation['Time'].diff().dropna()
+    positive_precip_deltas = precip_time_deltas[precip_time_deltas > pd.Timedelta(0)]
+    if len(positive_precip_deltas) > 0:
+        precip_bar_width = positive_precip_deltas.median() / pd.Timedelta(days=1)
+    else:
+        precip_bar_width = pd.Timedelta(hours=1) / pd.Timedelta(days=1)
+    precip_bar_width *= 0.9
+
+    streamflow_peak = pd.concat([
+        simulated['Discharge(m^3 s^-1)'],
+        observed['Observed(m^3 s^-1)']
+    ]).max(skipna=True)
+    precip_peak = precipitation['Precip(mm h^-1)'].max(skipna=True)
+    streamflow_ylim = streamflow_peak * 1.5 if pd.notna(streamflow_peak) and streamflow_peak > 0 else 1
+    precip_ylim = precip_peak * 1.5 if pd.notna(precip_peak) and precip_peak > 0 else 1
     
     # Create the figure with two y-axes
     fig, ax1 = plt.subplots(figsize=(12, 6))
     ax2 = ax1.twinx()
 
     # Plot discharge on left y-axis
-    ax1.plot(df['Time'], df['Discharge(m^3 s^-1)'], label='Simulated', linewidth=1)
-    ax1.plot(df['Time'], df['Observed(m^3 s^-1)'], label='Observed', linewidth=1)
+    ax1.plot(simulated['Time'], simulated['Discharge(m^3 s^-1)'], label='Simulated', linewidth=1)
+    ax1.plot(observed['Time'], observed['Observed(m^3 s^-1)'], label='Observed', linewidth=1)
     ax1.set_xlabel('Time')
     ax1.set_ylabel('Discharge (m³/s)')
-    # Set y-axis limit to 2.1 times the maximum observed discharge value
-    max_observed = df['Observed(m^3 s^-1)'].max()
-    ax1.set_ylim(0, max_observed * 2.1)
+    ax1.set_ylim(0, streamflow_ylim)
 
     # Plot precipitation on right y-axis (inverted)
-    ax2.plot(df['Time'], df['Precip(mm h^-1)'], color='blue', alpha=0.3, label='Precipitation')
+    ax2.bar(
+        precipitation['Time'],
+        precipitation['Precip(mm h^-1)'],
+        width=precip_bar_width,
+        color='blue',
+        alpha=0.3,
+        align='center',
+        label='Precipitation'
+    )
     ax2.set_ylabel('Precipitation (mm/h)')
     ax2.invert_yaxis()  # Invert the y-axis so 0 is at top
-    # Set y-axis limit to 2.1 times the maximum precipitation value (inverted)
-    max_precip = df['Precip(mm h^-1)'].max()
-    ax2.set_ylim(max_precip * 2.1, 0)  # Set inverted y-axis limits
+    ax2.set_ylim(precip_ylim, 0)  # Set inverted y-axis limits
 
     # Add legends
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -1143,14 +1219,12 @@ def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot
     plt.title('Simulated vs Observed Discharge with Precipitation')
 
     # Set x-axis limits to first and last time points
-    ax1.set_xlim(df['Time'].iloc[0], df['Time'].iloc[-1])
-
-    # Reduce x-axis density and rotate labels
-    step = 24  # Show every 24th tick
-    ax1.set_xticks(range(0, len(df), step))
-    ax1.set_xticklabels([t.split()[0] for t in df['Time'][::step]], rotation=45, ha='right')
+    ax1.set_xlim(x_min, x_max)
+    ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax1.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax1.xaxis.get_major_locator()))
 
     # Adjust layout to prevent label cutoff
+    fig.autofmt_xdate()
     plt.tight_layout()
 
     # Save the plot if a path is provided
@@ -1164,7 +1238,12 @@ def visualize_model_results(ts_file='../Output/ts.07325850.crest.csv', show_plot
     else:
         plt.close()
     
-def evaluate_model_performance(ts_file='../Output/ts.07325850.crest.csv'):
+def evaluate_model_performance(
+    ts_file='../Output/ts.07325850.crest.csv',
+    obs_file=None,
+    obs_alignment='interpolate',
+    max_obs_gap='1h'
+):
     """
     Evaluate hydrological model performance by calculating statistical metrics
     between simulated and observed discharge.
@@ -1173,6 +1252,15 @@ def evaluate_model_performance(ts_file='../Output/ts.07325850.crest.csv'):
     -----------
     ts_file : str, optional
         Path to the time series CSV file with model results
+    obs_file : str, optional
+        Path to the original USGS observation CSV. If not provided, the function
+        tries to find USGS_<site_id>_UTC_m3s.csv next to the Output directory.
+    obs_alignment : str, optional
+        Method to align observed data to simulated timestamps. Use 'interpolate'
+        or 'nearest' (default: 'interpolate').
+    max_obs_gap : str or pandas.Timedelta, optional
+        Maximum gap between surrounding observation points allowed for alignment.
+        Use None to allow interpolation across any gap.
         
     Returns:
     --------
@@ -1192,18 +1280,113 @@ def evaluate_model_performance(ts_file='../Output/ts.07325850.crest.csv'):
     
     print(f"Evaluating model performance from: {os.path.abspath(ts_file)}")
     
-    # Extract simulated and observed discharge
-    sim = df['Discharge(m^3 s^-1)'].values
-    obs = df['Observed(m^3 s^-1)'].values
-    
-    # Remove any rows where either simulated or observed values are NaN
-    valid_indices = ~(np.isnan(sim) | np.isnan(obs))
-    sim = sim[valid_indices]
-    obs = obs[valid_indices]
+    time = pd.to_datetime(df['Time'], errors='coerce', utc=True).dt.tz_convert(None)
+    if time.isna().any():
+        print("Error: Unable to parse one or more values in the Time column.")
+        return None
+
+    eval_df = pd.DataFrame({
+        'Time': time,
+        'sim': pd.to_numeric(df['Discharge(m^3 s^-1)'], errors='coerce'),
+        'obs_ts': pd.to_numeric(df['Observed(m^3 s^-1)'], errors='coerce')
+    }).sort_values('Time')
+
+    sim_df = eval_df[['Time', 'sim']].dropna()
+    obs_source = 'model output time series'
+    obs_df = eval_df[['Time', 'obs_ts']].dropna().rename(columns={'obs_ts': 'obs'})
+
+    site_match = re.search(r'ts\.([^.]+)\.crest\.csv$', os.path.basename(ts_file))
+    if obs_file is None and site_match:
+        site_id = site_match.group(1)
+        ts_dir = os.path.dirname(os.path.abspath(ts_file))
+        parent_dir = os.path.dirname(ts_dir)
+        obs_candidates = [
+            os.path.join(parent_dir, 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(ts_dir, '..', 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(ts_dir, f'USGS_{site_id}_UTC_m3s.csv'),
+            os.path.join(os.getcwd(), '..', 'USGS_gauge', f'USGS_{site_id}_UTC_m3s.csv')
+        ]
+        for candidate in obs_candidates:
+            candidate = os.path.abspath(candidate)
+            if os.path.exists(candidate):
+                obs_file = candidate
+                break
+
+    if obs_file and os.path.exists(obs_file):
+        try:
+            usgs_df = pd.read_csv(obs_file)
+            if {'datetime', 'discharge'}.issubset(usgs_df.columns):
+                usgs_df['Time'] = pd.to_datetime(usgs_df['datetime'], errors='coerce', utc=True).dt.tz_convert(None)
+                usgs_df['obs'] = pd.to_numeric(usgs_df['discharge'], errors='coerce')
+                usgs_df = usgs_df[['Time', 'obs']].dropna().sort_values('Time')
+                if not usgs_df.empty:
+                    obs_df = usgs_df
+                    obs_source = os.path.abspath(obs_file)
+            else:
+                print(f"Warning: Observation file missing datetime/discharge columns: {obs_file}")
+        except Exception as e:
+            print(f"Warning: Could not read observation file {obs_file}: {str(e)}")
+
+    if sim_df.empty or obs_df.empty:
+        print("Error: No valid simulated or observed data points")
+        return None
+
+    obs_df = obs_df.groupby('Time', as_index=False)['obs'].mean().sort_values('Time')
+    sim_times = pd.DatetimeIndex(sim_df['Time'])
+    obs_series = obs_df.set_index('Time')['obs'].sort_index()
+
+    if obs_alignment == 'interpolate':
+        combined_index = obs_series.index.union(sim_times).sort_values()
+        aligned_obs = obs_series.reindex(combined_index).interpolate(method='time', limit_area='inside').reindex(sim_times)
+    elif obs_alignment == 'nearest':
+        aligned_obs = obs_series.reindex(sim_times, method='nearest')
+    else:
+        print("Error: obs_alignment must be 'interpolate' or 'nearest'")
+        return None
+
+    if max_obs_gap is not None:
+        max_obs_gap = pd.Timedelta(max_obs_gap)
+        previous_obs_time = obs_series.index.searchsorted(sim_times, side='right') - 1
+        next_obs_time = obs_series.index.searchsorted(sim_times, side='left')
+        valid_gap = np.ones(len(sim_times), dtype=bool)
+
+        has_previous = previous_obs_time >= 0
+        has_next = next_obs_time < len(obs_series.index)
+
+        if obs_alignment == 'interpolate':
+            valid_gap = has_previous & has_next
+            valid_gap[valid_gap] = (
+                obs_series.index[next_obs_time[valid_gap]] -
+                obs_series.index[previous_obs_time[valid_gap]]
+            ) <= max_obs_gap
+        else:
+            nearest_gap = np.full(len(sim_times), pd.Timedelta.max)
+            nearest_gap[has_previous] = np.minimum(
+                nearest_gap[has_previous],
+                sim_times[has_previous] - obs_series.index[previous_obs_time[has_previous]]
+            )
+            nearest_gap[has_next] = np.minimum(
+                nearest_gap[has_next],
+                obs_series.index[next_obs_time[has_next]] - sim_times[has_next]
+            )
+            valid_gap = nearest_gap <= max_obs_gap
+
+        aligned_obs = aligned_obs.where(valid_gap)
+
+    aligned_df = pd.DataFrame({
+        'sim': sim_df['sim'].values,
+        'obs': aligned_obs.to_numpy()
+    }).dropna()
+
+    sim = aligned_df['sim'].values
+    obs = aligned_df['obs'].values
     
     if len(sim) == 0 or len(obs) == 0:
-        print("Error: No valid data points after removing NaN values")
+        print("Error: No valid data points after aligning observed data")
         return None
+
+    print(f"Using observed discharge from: {obs_source}")
+    print(f"Aligned {len(obs)} observed points to simulated timestamps for evaluation")
     
     # Calculate Root Mean Square Error (RMSE)
     rmse = np.sqrt(np.mean((sim - obs) ** 2))
