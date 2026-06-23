@@ -30,6 +30,7 @@ import rasterio
 from osgeo import gdal
 import geopandas as gpd
 from rasterio.windows import from_bounds
+from rasterio.merge import merge
 import folium
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -665,10 +666,11 @@ def clip_tif_by_shapefile(tif_path, output_path, shp_path):
             # Write the clipped data to a new GeoTIFF
             with rasterio.open(output_path, "w", **out_meta) as dst:
                 dst.write(data)
-                
+            return True
         
     except Exception as e:
         tqdm.write(f"Error clipping {os.path.basename(tif_path)}: {str(e)[:100]}...")
+        return False
 
 def batch_clip_tifs_by_shapefile(input_dir='../BasicData', output_dir='../BasicData_Clip', shp_path='../shpFile/WBDHU12_CobbFort_sub2.shp'):
     """
@@ -2012,7 +2014,151 @@ def get_gauge_coordinates(gauge_meta_path, station_id):
     
     return (lat, lon)
 
-def download_hydrosheds_data(latitude, longitude, dest_folder="../BasicData"):
+def _download_hydrosheds_data_multitile(latitude, longitude, dest_folder="../BasicData", basin_shp_path=None, tile_buffer_deg=0.05):
+    """
+    Download HydroSHEDS tiles and mosaic neighboring tiles when the basin crosses
+    a 10-degree tile boundary.
+    """
+    from zipfile import ZipFile
+    import math
+
+    os.makedirs(dest_folder, exist_ok=True)
+
+    for file_path in glob.glob(os.path.join(dest_folder, '*')):
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+        elif os.path.isdir(file_path):
+            shutil.rmtree(file_path)
+    print(f"Cleared all existing files in {dest_folder}")
+
+    def format_tile_prefix(lat_floor, lon_floor):
+        lat_prefix = f"N{abs(lat_floor):02d}" if lat_floor >= 0 else f"S{abs(lat_floor):02d}"
+        lon_prefix = f"E{abs(lon_floor):03d}" if lon_floor >= 0 else f"W{abs(lon_floor):03d}"
+        return f"{lat_prefix}{lon_prefix}"
+
+    def tile_prefix_for_point(lat, lon):
+        lat_floor = math.floor(lat / 10) * 10
+        lon_floor = math.floor(lon / 10) * 10
+        return format_tile_prefix(lat_floor, lon_floor)
+
+    def tile_prefixes_for_bounds(bounds):
+        minx, miny, maxx, maxy = bounds
+        minx -= tile_buffer_deg
+        miny -= tile_buffer_deg
+        maxx += tile_buffer_deg
+        maxy += tile_buffer_deg
+        lat_start = math.floor(miny / 10) * 10
+        lat_end = math.floor(maxy / 10) * 10
+        lon_start = math.floor(minx / 10) * 10
+        lon_end = math.floor(maxx / 10) * 10
+        prefixes = []
+        for lat_floor in range(lat_start, lat_end + 10, 10):
+            for lon_floor in range(lon_start, lon_end + 10, 10):
+                prefixes.append(format_tile_prefix(lat_floor, lon_floor))
+        return prefixes
+
+    if basin_shp_path and os.path.exists(basin_shp_path):
+        basin_gdf = gpd.read_file(basin_shp_path)
+        if basin_gdf.crs is not None and basin_gdf.crs.to_epsg() != 4326:
+            basin_gdf = basin_gdf.to_crs(epsg=4326)
+        tile_prefixes = tile_prefixes_for_bounds(basin_gdf.total_bounds)
+        print(f"Determined HydroSHEDS tiles from basin bounds: {', '.join(tile_prefixes)}")
+    else:
+        tile_prefixes = [tile_prefix_for_point(latitude, longitude)]
+        print(f"Determined HydroSHEDS tile from gauge coordinates: {tile_prefixes[0]}")
+
+    products = {
+        'acc': {
+            'url_dir': 'https://data.hydrosheds.org/file/hydrosheds-v1-acc/na_acc_3s',
+            'zip_suffix': '_acc.zip',
+            'output_name': 'facc.tif'
+        },
+        'con': {
+            'url_dir': 'https://data.hydrosheds.org/file/hydrosheds-v1-con/na_con_3s',
+            'zip_suffix': '_con.zip',
+            'output_name': 'dem.tif'
+        },
+        'dir': {
+            'url_dir': 'https://data.hydrosheds.org/file/hydrosheds-v1-dir/na_dir_3s',
+            'zip_suffix': '_dir.zip',
+            'output_name': 'fdir.tif'
+        }
+    }
+    downloaded_files = {product: [] for product in products}
+
+    for tile_prefix in tile_prefixes:
+        for product, config in products.items():
+            file_prefix = tile_prefix if product == 'acc' else tile_prefix.lower()
+            filename = f"{file_prefix}{config['zip_suffix']}"
+            url = f"{config['url_dir']}/{filename}"
+            zip_path = os.path.join(dest_folder, filename)
+
+            print(f"Downloading from {url}...")
+            response = requests.get(url)
+            if response.status_code != 200:
+                print(f"Failed to download {filename}. Status code: {response.status_code}")
+                return False
+
+            with open(zip_path, 'wb') as f:
+                f.write(response.content)
+            print(f"Downloaded {filename} to {dest_folder}")
+
+            before_extract = set(glob.glob(os.path.join(dest_folder, '*.tif')))
+            with ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(dest_folder)
+            after_extract = set(glob.glob(os.path.join(dest_folder, '*.tif')))
+            new_tifs = sorted(after_extract - before_extract)
+            if not new_tifs:
+                suffix = config['zip_suffix'].replace('.zip', '.tif')
+                new_tifs = sorted(glob.glob(os.path.join(dest_folder, f"*{suffix}")))
+            downloaded_files[product].extend(new_tifs)
+            print(f"Extracted contents to {dest_folder}")
+
+            os.remove(zip_path)
+            print(f"Removed zip file: {zip_path}")
+
+    for product, config in products.items():
+        tif_files = sorted(set(downloaded_files[product]))
+        output_path = os.path.join(dest_folder, config['output_name'])
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        if not tif_files:
+            print(f"Error: No extracted {product} GeoTIFF files found")
+            return False
+
+        if len(tif_files) == 1:
+            os.replace(tif_files[0], output_path)
+            print(f"Renamed {os.path.basename(tif_files[0])} to {config['output_name']}")
+            continue
+
+        src_files = []
+        try:
+            for tif_file in tif_files:
+                src_files.append(rasterio.open(tif_file))
+            mosaic, out_transform = merge(src_files)
+            out_meta = src_files[0].meta.copy()
+            out_meta.update({
+                'driver': 'GTiff',
+                'height': mosaic.shape[1],
+                'width': mosaic.shape[2],
+                'transform': out_transform,
+                'compress': 'deflate'
+            })
+            with rasterio.open(output_path, 'w', **out_meta) as dst:
+                dst.write(mosaic)
+            print(f"Mosaicked {len(tif_files)} {product} tiles to {config['output_name']}")
+        finally:
+            for src in src_files:
+                src.close()
+
+        for tif_file in tif_files:
+            if os.path.exists(tif_file):
+                os.remove(tif_file)
+
+    return True
+
+def download_hydrosheds_data(latitude, longitude, dest_folder="../BasicData", basin_shp_path=None, tile_buffer_deg=0.05):
     """
     Download and process HydroSHEDS data based on coordinates.
     
@@ -2024,12 +2170,25 @@ def download_hydrosheds_data(latitude, longitude, dest_folder="../BasicData"):
         Longitude of the gauge station
     dest_folder : str, optional
         Destination folder for downloaded data (default: "../BasicData")
+    basin_shp_path : str, optional
+        Watershed shapefile path. When provided, all HydroSHEDS tiles intersecting
+        the watershed bounds are downloaded and mosaicked before clipping.
+    tile_buffer_deg : float, optional
+        Extra degree buffer around the watershed bounds when selecting tiles.
     
     Returns:
     --------
     bool
         True if successful, False otherwise
     """
+    return _download_hydrosheds_data_multitile(
+        latitude,
+        longitude,
+        dest_folder=dest_folder,
+        basin_shp_path=basin_shp_path,
+        tile_buffer_deg=tile_buffer_deg
+    )
+
     import os
     import requests
     from zipfile import ZipFile
